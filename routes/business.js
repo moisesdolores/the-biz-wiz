@@ -70,4 +70,5 @@ router.delete("/:postId/:commentsId", deleteComment);
 // search engine for business name, description
 router.get("/search?:query", getBusinessByName);
 
+
 module.exports = router;
