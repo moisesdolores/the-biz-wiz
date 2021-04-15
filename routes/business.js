@@ -59,6 +59,7 @@ router.post("/:postId", createComment);
 // business updates a post
 router.put("/:postId", updatePost);
 // business updates a comment
+router.put("/:commentId", updateComment);
 
 // business deletes a post
 router.delete("/:postId", deletePost);
