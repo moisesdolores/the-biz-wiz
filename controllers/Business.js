@@ -1,6 +1,7 @@
 require("dotenv").config();
 const db = require("../db");
 const bcrypt = require("bcrypt");
+const { generateToken } = require("../middleware/business-auth");
 
 //get all businesses from database
 async function getAllBusinesses(req, res) {
@@ -14,66 +15,110 @@ async function getAllBusinesses(req, res) {
 
 //get business by location
 async function locateBusiness(req, res) {
-  const address = JSON.stringify(req.params.address);
   try {
     const businesses = await db.any(
-      "SELECT * FROM businesses WHERE address=$1",
-      address
+      "SELECT * FROM businesses WHERE street_address=${street_address} AND city=${city} AND state=${state} AND zip=${zip}",
+      req.body
     );
-    return res.json(businesses);
+    return res.status(200).json(businesses);
   } catch (err) {
-    res.status(500).json(err);
+    res.status(500).json(err.message);
   }
 }
 
 //get business by name
 async function getBusinessByName(req, res) {
+  const query = req.params.query;
+  console.log("query: ", query);
   try {
+    console.log("inside try");
     const results = await db.any(
-      "SELECT * FROM businesses WHERE business_name = ${query}",
-      req.params
+      `SELECT * FROM businesses WHERE lower(business_name) LIKE '%${query.toLowerCase()}%';`
     );
-    return res.json(results);
+    console.log("results: ", results);
+    return res.status(200).json(results);
   } catch (err) {
-    res.status(500).json(err);
+    res.status(500).json(err.message);
   }
 }
 
 //get a single business from table matching id
 async function getABusiness(req, res) {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(res["business_id"], 10);
   try {
     const business = await db.one("SELECT * FROM businesses where id = $1", id);
     return res.json(business);
   } catch (err) {
-    res.status(500).json(err);
+    return res.status(500).json({ message: err.message });
+  }
+}
+
+async function getBusinessInfo(req, res) {
+  const businessID = req.body["business_id"]
+    ? parseInt(req.body["business_id"], 10)
+    : parseInt(req.params["business_id"]);
+
+  try {
+    const business = await db.one(
+      "SELECT * FROM businesses where id = $1",
+      businessID
+    );
+    return res.json(business);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
   }
 }
 
 //create one business and add to table
 async function createBusiness(req, res) {
+  let business = req.body;
+  let hashedPassword;
+  const saltRounds = 10;
+  console.log("create a business: ", business);
+
+  // validate business account info (needs work)
+  if (!business) {
+    return res.status(400).json({
+      message: "Invalid account info",
+    });
+  }
+
   try {
-    console.log("JEST YOU'RE RUDE inside");
-    const { password } = req.body;
+    hashedPassword = await bcrypt.hash(business.password, saltRounds);
+    business["password"] = hashedPassword;
+  } catch (err) {
+    return res.status(401).json({
+      message: "Invalid password",
+      error: err.message,
+    });
+  }
 
-    let hashedPassword;
-    const saltRounds = 10;
-    hashedPassword = await bcrypt.hash(password, saltRounds);
+  let token;
 
-    let user = req.body;
-    user["password"] = hashedPassword;
-
+  try {
     await db.none(
-      "INSERT INTO businesses (business_name, user_name, password, address, type, logo) VALUES (${business_name}, ${user_name}, ${password}, ${address}, ${type}, ${logo})",
-      user
+      "INSERT INTO businesses (business_name, first_name, last_name, user_name, email, password, street_address, city, state, zip, business_type, acct_type, logo) VALUES (${business_name}, ${first_name}, ${last_name}, ${user_name}, ${email}, ${password}, ${street_address}, ${city}, ${state}, ${zip}, ${business_type}, ${acct_type}, ${logo})",
+      business
     );
 
-    return res.status(200).json({
-      message: "business account registered",
-    });
+    const businessID = await db.one(
+      "SELECT id, acct_type FROM businesses WHERE user_name=${user_name}",
+      business
+    );
+
+    console.log("businessID ", businessID);
+
+    token = await generateToken(businessID);
+
+    // return res.status(201).json({
+    //   message: "business account registered"
+    // })
   } catch (err) {
-    res.status(500).send(err);
+    console.log(`ERR CAUGHT: ${err.message}`);
+    return res.status(400).send(err);
   }
+
+  return res.status(201).json({ token });
 }
 
 //login business
@@ -85,67 +130,92 @@ async function loginBusiness(req, res) {
     req.body
   );
 
-  let user;
+  let business;
 
   if (!exists) {
     return res.status(404).json({
       message: "No user found with that user name",
     });
   } else {
-    user = await db.one(
+    business = await db.one(
       "SELECT * FROM businesses WHERE user_name=${user_name}",
       req.body
     );
+    console.log(business);
   }
 
   let match;
 
   try {
-    match = await bcrypt.compare(password, user.password);
-
+    match = await bcrypt.compare(password, business.password);
     if (!match) {
-      return res.status(404).json({
+      return res.status(401).json({
         message: "Invalid Credentials",
       });
     } else {
-      req.session.user = user;
+      const token = await generateToken(business);
 
-      return res.status(200).json({
-        message: "Logged in",
-      });
+      return res.status(202).json({ token: token });
     }
   } catch (err) {
-    return res.status(500).json(err);
+    return res.status(400).json(err.message);
   }
 }
 
 //update single business from database
 async function updateBusiness(req, res) {
-  const id = parseInt(req.params.id, 10);
+  function parseBody(req) {
+    const changes = Object.entries(req.body);
+    console.log(`changes ${changes}`);
+
+    let query = "UPDATE businesses SET";
+
+    changes.forEach(([key, value], idx) => {
+      if (changes.length > 1 && idx !== changes.length - 1) {
+        query += ` ${key}='${value}',`;
+      } else {
+        query += ` ${key}='${value}'`;
+      }
+    });
+
+    query += ` WHERE id=${parseInt(res["business_id"], 10)} RETURNING *;`;
+
+    console.log(`query: ${query}`);
+
+    return query;
+  }
+
   try {
-    await db.none(
-      "UPDATE businesses SET business_name=$1, user_name=$2, password=$3, address=$4, type=$5, logo=$6 WHERE id=$7",
-      [
-        req.body.business_name,
-        req.body.user_name,
-        req.body.password,
-        req.body.address,
-        req.body.type,
-        req.body.logo,
-        id,
-      ]
-    );
-    return res.json({
+    await db.one(parseBody(req));
+    return res.status(202).json({
       message: "success",
     });
-  } catch {
-    res.status(500).json(err);
+  } catch (err) {
+    return res.status(500).json({
+      message: err.message,
+    });
+  }
+}
+
+// grabs businesses by a type
+// /business/category/:type
+async function businessByType(req, res) {
+  const type = req.params.type;
+  try {
+    const businesses = await db.any(
+      "SELECT * FROM businesses WHERE business_type=$1",
+      type
+    );
+    res.status(200).json(businesses);
+  } catch (err) {
+    return res.status(404).send(err.message);
   }
 }
 
 //delete a business from database
 async function deleteBusiness(req, res) {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(res["business_id"], 10);
+
   try {
     await db.none("DELETE FROM businesses WHERE id=$1", id);
     return res.json({
@@ -161,8 +231,10 @@ module.exports = {
   locateBusiness,
   getBusinessByName,
   getABusiness,
+  getBusinessInfo,
   createBusiness,
   loginBusiness,
   updateBusiness,
+  businessByType,
   deleteBusiness,
 };
